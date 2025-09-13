@@ -1,5 +1,5 @@
 -- ftplugin/sus.lua (Neovim)
--- Neovim integration via nvim-lspconfig. Requires Neovim >= 0.11.4.
+-- Neovim integration using built-in LSP (no lspconfig dependency). Requires Neovim >= 0.11.4.
 
 if not vim.g._sus_lsp_setup_done then
   local supported = false
@@ -24,21 +24,25 @@ if not vim.g._sus_lsp_setup_done then
     return
   end
 
-  local ok_lspconfig, lspconfig = pcall(require, 'lspconfig')
-  if not ok_lspconfig then
+  local ok_mod, sus = pcall(require, 'sus_lsp')
+  if not ok_mod then
     vim.schedule(function()
-      vim.notify('sus.vim: nvim-lspconfig not found. Please install neovim/nvim-lspconfig.', vim.log.levels.ERROR)
+      vim.notify('sus.vim: failed to load sus_lsp module.', vim.log.levels.ERROR)
     end)
     return
   end
-
-  local util = require('lspconfig.util')
-  local configs = require('lspconfig.configs')
 
   local tcp = vim.g.sus_lsp_tcp or {}
   local host = tcp.host or '127.0.0.1'
   local port = tonumber(tcp.port or 25000)
   local use_stdio = (vim.g.sus_lsp_use_stdio == 1)
+  local wait_ms = tonumber(vim.g.sus_lsp_wait_ms or 0)
+  local connect_tries = tonumber(vim.g.sus_lsp_connect_tries or 15)
+  local connect_delay = tonumber(vim.g.sus_lsp_connect_delay_ms or 200)
+
+  -- root dir handled by sus_lsp via vim.fs; nothing to do here
+
+  -- Avoid probing the TCP port directly to not steal single-client servers.
 
   local function start_tcp_server()
     if use_stdio then return end
@@ -70,26 +74,27 @@ if not vim.g._sus_lsp_setup_done then
     start_tcp_server()
   end, {})
 
-  if not configs.sus_compiler then
-    configs.sus_compiler = {
-      default_config = {
-        name = 'sus_compiler',
-        cmd = (use_stdio and (vim.g.sus_lsp_cmd or { 'sus_compiler', '--lsp' }))
-          or vim.lsp.rpc.connect(host, port),
-        filetypes = { 'sus' },
-        root_dir = util.root_pattern('sus.toml', '.git') or vim.fn.getcwd(),
-      },
-      docs = {
-        description = 'sus_compiler language server',
-      },
-    }
-  end
-
   -- Ensure TCP server is running when using TCP mode
   if not use_stdio then
     start_tcp_server()
   end
-
-  lspconfig.sus_compiler.setup({})
+  -- Configure and connect the LSP client (TCP by default)
+  sus.setup({
+    host = host,
+    port = port,
+    name = 'sus_compiler',
+    use_stdio = use_stdio,
+    cmd = vim.g.sus_lsp_cmd,
+  })
+  local bufnr = vim.api.nvim_get_current_buf()
+  local function attempt_connect(i)
+    if sus.connect(bufnr, false) then return end
+    if i < connect_tries then
+      vim.defer_fn(function() attempt_connect(i + 1) end, connect_delay)
+    else
+      if wait_ms > 0 then vim.defer_fn(function() sus.connect(bufnr, true) end, wait_ms) else sus.connect(bufnr, true) end
+    end
+  end
+  attempt_connect(1)
   vim.g._sus_lsp_setup_done = true
 end

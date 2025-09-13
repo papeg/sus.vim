@@ -6,6 +6,8 @@ local defaults = {
   port = 25000,
   name = "sus_compiler",
   debounce_text_changes = 150,
+  use_stdio = false,
+  cmd = nil, -- e.g., { 'sus_compiler', '--lsp' }
 }
 
 local state = {
@@ -46,9 +48,27 @@ local function try_start_with_transport(name, cmd_factory, debounce, bufnr)
   if type(vim.lsp.start) ~= "function" then
     return nil, "vim.lsp.start not available (requires Neovim 0.10+)"
   end
+  local root_dir = (function()
+    local bufname = vim.api.nvim_buf_get_name(bufnr)
+    local start = (bufname ~= "" and (vim.fs and vim.fs.dirname and vim.fs.dirname(bufname))) or (vim.loop and vim.loop.cwd()) or vim.fn.getcwd()
+    local found
+    if vim.fs and vim.fs.find then
+      found = vim.fs.find({ 'sus.toml', '.git' }, { path = start, upward = true })
+    end
+    if found and #found > 0 then
+      if vim.fs and vim.fs.dirname then
+        return vim.fs.dirname(found[1])
+      else
+        return start
+      end
+    end
+    return (vim.loop and vim.loop.cwd()) or vim.fn.getcwd()
+  end)()
+
   local ok, id = pcall(vim.lsp.start, {
     name = name,
     cmd = cmd_factory,
+    root_dir = root_dir,
     flags = { debounce_text_changes = debounce },
   }, { bufnr = bufnr })
   if ok and id then return id, nil end
@@ -90,17 +110,35 @@ function M.connect(bufnr, verbose)
 
   local reasons = {}
   do
-    local cmd_factory, err = try_rpc_connect(o.host, o.port)
-    if cmd_factory then
-      local id, err2 = try_start_with_transport(o.name, cmd_factory, o.debounce_text_changes, bufnr)
-      if id then
-        if verbose then vim.notify(o.name.." connected via rpc.connect + vim.lsp.start.", vim.log.levels.INFO) end
-        return true
+    if o.use_stdio and type(o.cmd) == "table" then
+      if type(vim.lsp.start) ~= "function" then
+        table.insert(reasons, "vim.lsp.start not available for stdio")
       else
-        table.insert(reasons, tostring(err2))
+        local ok, id = pcall(vim.lsp.start, {
+          name = o.name,
+          cmd = o.cmd,
+          flags = { debounce_text_changes = o.debounce_text_changes },
+        }, { bufnr = bufnr })
+        if ok and id then
+          if verbose then vim.notify(o.name.." started via stdio.", vim.log.levels.INFO) end
+          return true
+        else
+          table.insert(reasons, "vim.lsp.start with stdio cmd failed")
+        end
       end
     else
-      table.insert(reasons, err)
+      local cmd_factory, err = try_rpc_connect(o.host, o.port)
+      if cmd_factory then
+        local id, err2 = try_start_with_transport(o.name, cmd_factory, o.debounce_text_changes, bufnr)
+        if id then
+          if verbose then vim.notify(o.name.." connected via tcp.", vim.log.levels.INFO) end
+          return true
+        else
+          table.insert(reasons, tostring(err2))
+        end
+      else
+        table.insert(reasons, err)
+      end
     end
   end
 
@@ -109,4 +147,3 @@ function M.connect(bufnr, verbose)
 end
 
 return M
-
